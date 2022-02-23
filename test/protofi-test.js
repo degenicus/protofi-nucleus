@@ -9,6 +9,12 @@ const moveTimeForward = async seconds => {
   await network.provider.send('evm_mine');
 };
 
+const mineNBlocks = async n => {
+  for (let index = 0; index < n; index++) {
+    await ethers.provider.send('evm_mine');
+  }
+};
+
 const toWantUnit = (num, isUSDC = false) => {
   if (isUSDC) {
     return ethers.BigNumber.from(num * 10 ** 8);
@@ -26,8 +32,8 @@ describe('Vaults', function () {
   const paymentSplitterAddress = '0x63cbd4134c2253041F370472c130e92daE4Ff174';
   let treasury;
   let want;
-  const ftmUsdcLPAddress = '0x1a8a4Dc716e9379e84E907B0c740d2c622F7cfb7';
-  const wantAddress = ftmUsdcLPAddress;
+  const ftmProtoLPAddress = '0xfbf535224f1f473b6438bf50fbf3200b8659edde';
+  const wantAddress = ftmProtoLPAddress;
   let self;
   let wantWhale;
   let selfAddress;
@@ -42,7 +48,7 @@ describe('Vaults', function () {
         {
           forking: {
             jsonRpcUrl: 'https://rpc.ftm.tools/',
-            blockNumber: 31220919,
+            blockNumber: 31785260,
           },
         },
       ],
@@ -50,8 +56,8 @@ describe('Vaults', function () {
     console.log('providers');
     //get signers
     [owner, addr1, addr2, addr3, addr4, ...addrs] = await ethers.getSigners();
-    const wantHolder = '0x99d9956a937d29c85068cbd4fe4b1e68e37b0706'; // ftm-usdc
-    const wantWhaleAddress = '0x70083a816329942e7e962829aff470b3015ff545'; // ftm-usdc
+    const wantHolder = '0x346f59ac0af2c85db1250322b2bed4eeb4c61313'; // ftm-proto
+    const wantWhaleAddress = '0x9d903922b93cb41759692ffe7b9b27a6d0ff14c1'; // ftm-proto
     const strategistAddress = '0x3b410908e71Ee04e7dE2a87f8F9003AFe6c1c7cE';
     await hre.network.provider.request({
       method: 'hardhat_impersonateAccount',
@@ -73,7 +79,7 @@ describe('Vaults', function () {
     console.log('addresses');
 
     //get artifacts
-    Strategy = await ethers.getContractFactory('ReaperAutoCompoundProtofiFarmer');
+    Strategy = await ethers.getContractFactory('ReaperAutoCompoundProtofiNucleus');
     Vault = await ethers.getContractFactory('ReaperVaultv1_3');
     Treasury = await ethers.getContractFactory('ReaperTreasury');
     Want = await ethers.getContractFactory('@openzeppelin/contracts/token/ERC20/ERC20.sol:ERC20');
@@ -87,8 +93,8 @@ describe('Vaults', function () {
     const depositFee = 10;
     vault = await Vault.deploy(
       wantAddress,
-      'Protofi FTM-USDC Vault',
-      'rfPF-FTM-USDC',
+      'Protofi FTM-PROTO Vault',
+      'rfPF-FTM-PROTO',
       depositFee,
       ethers.utils.parseEther('999999'),
     );
@@ -97,7 +103,7 @@ describe('Vaults', function () {
     console.log(`vault.address: ${vault.address}`);
     console.log(`treasury.address: ${treasury.address}`);
 
-    const poolId = 2; // FTM-USDC
+    const poolId = 1; // FTM-PROTO
 
     console.log('strategy');
     strategy = await hre.upgrades.deployProxy(
@@ -118,23 +124,16 @@ describe('Vaults', function () {
     await want.approve(vault.address, ethers.utils.parseEther('1000000000'));
     await want.connect(self).approve(vault.address, ethers.utils.parseEther('1000000000'));
     await want.connect(wantWhale).approve(vault.address, ethers.utils.parseEther('1000000000'));
-    console.log('approvals4');
     await vault.connect(wantWhale).approve(vault.address, ethers.utils.parseEther('1000000000'));
   });
 
   describe('Deploying the vault and strategy', function () {
     xit('should initiate vault with a 0 balance', async function () {
-      console.log(1);
       const totalBalance = await vault.balance();
-      console.log(2);
       const availableBalance = await vault.available();
-      console.log(3);
       const pricePerFullShare = await vault.getPricePerFullShare();
-      console.log(4);
       expect(totalBalance).to.equal(0);
-      console.log(5);
       expect(availableBalance).to.equal(0);
-      console.log(6);
       expect(pricePerFullShare).to.equal(ethers.utils.parseEther('1'));
     });
   });
@@ -276,14 +275,15 @@ describe('Vaults', function () {
     });
 
     xit('should be able to harvest', async function () {
-      await vault.connect(self).deposit(toWantUnit(1000, true));
+      await vault.connect(self).deposit(toWantUnit('1'));
       const estimatedGas = await strategy.estimateGas.harvest();
       console.log(`estimatedGas: ${estimatedGas}`);
       await strategy.connect(self).harvest();
     });
 
-    it('should provide yield', async function () {
-      const timeToSkip = 36000000;
+    xit('should provide yield', async function () {
+      const timeToSkip = 43200; // 12 h
+      const blocksToSkip = 14400 / 20;
       const initialUserBalance = await want.balanceOf(selfAddress);
       console.log(initialUserBalance);
       const depositAmount = initialUserBalance.div(1);
@@ -296,6 +296,7 @@ describe('Vaults', function () {
       const numHarvests = 10;
       for (let i = 0; i < numHarvests; i++) {
         await moveTimeForward(timeToSkip);
+        await mineNBlocks(blocksToSkip);
         //await vault.connect(self).deposit(depositAmount);
         await strategy.harvest();
       }
@@ -348,15 +349,19 @@ describe('Vaults', function () {
       await expect(strategy.retireStrat()).to.not.be.reverted;
     });
 
-    xit('should be able to estimate harvest', async function () {
-      const whaleDepositAmount = toWantUnit('0.001');
+    it('should be able to estimate harvest', async function () {
+      const whaleDepositAmount = toWantUnit('100');
       await vault.connect(wantWhale).deposit(whaleDepositAmount);
       const minute = 60;
       const hour = 60 * minute;
       const day = 24 * hour;
       await moveTimeForward(100 * day);
+      await mineNBlocks(1000);
+
       await strategy.harvest();
       await moveTimeForward(10 * day);
+      await mineNBlocks(100);
+
       const [profit, callFeeToUser] = await strategy.estimateHarvest();
       console.log(`profit: ${profit}`);
       const hasProfit = profit.gt(0);

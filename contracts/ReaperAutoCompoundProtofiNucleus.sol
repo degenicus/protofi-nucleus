@@ -4,7 +4,12 @@ import './abstract/ReaperBaseStrategy.sol';
 import './interfaces/IUniswapRouter.sol';
 import './interfaces/IMasterChef.sol';
 import './interfaces/IUniswapV2Pair.sol';
+import './interfaces/IMoneyPot.sol';
+import './interfaces/IZap.sol';
+import './interfaces/IElectronToken.sol';
 import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
+
+import 'hardhat/console.sol';
 
 pragma solidity 0.8.11;
 
@@ -17,13 +22,15 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
     /**
      * @dev Tokens Used:
      * {WFTM} - Required for liquidity routing when doing swaps. Also used to charge fees on yield.
-     * {PROTO} - The reward token for farming
+     * {ELECTRON} - The reward token for farming
+     * {PROTON} - Token gained from swapping Electron, to be converted to LP
      * {want} - The vault token the strategy is maximizing
      * {lpToken0} - Token 0 of the LP want token
      * {lpToken1} - Token 1 of the LP want token
      */
     address public constant WFTM = 0x21be370D5312f44cB42ce377BC9b8a0cEF1A4C83;
-    address public constant PROTO = 0xa23c4e69e5Eaf4500F2f9301717f12B578b948FB;
+    address public constant ELECTRON = 0x622265EaB66A45FA05bAc9B8d2262AA548FA449E;
+    address public constant PROTON = 0xa23c4e69e5Eaf4500F2f9301717f12B578b948FB;
     address public want;
     address public lpToken0;
     address public lpToken1;
@@ -32,18 +39,21 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
      * @dev Third Party Contracts:
      * {PROTOFI_ROUTER} - The Protofi router
      * {MASTER_CHEF} - The Protofi MasterChef contract, used for staking the LPs for rewards
+     * {MONEY_POT} - The Protofi MoneyPot contract, used for staking Electron to farm secondary rewards
      */
     address public constant PROTOFI_ROUTER = 0xF4C587a0972Ac2039BFF67Bc44574bB403eF5235;
     address public constant MASTER_CHEF    = 0xa71f52aee8311c22b6329EF7715A5B8aBF1c6588;
+    address public constant MONEY_POT      = 0x180B3622BcC123e900E5eB603066755418d0b4F5;
+    address public constant ZAP            = 0xF0ff07d19f310abab54724a8876Eee71E338c82F;
 
     /**
      * @dev Routes we take to swap tokens
-     * {protoToWftmRoute} - Route we take to get from {PROTO} into {WFTM}.
+     * {electronToWftmRoute} - Route we take to get from {ELECTRON} into {WFTM}.
      * {wftmToWantRoute} - Route we take to get from {WFTM} into {want}.
      * {wftmToLp0Route} - Route we take to get from {WFTM} into {lpToken0}.
      * {wftmToLp1Route} - Route we take to get from {WFTM} into {lpToken1}.
      */
-    address[] public protoToWftmRoute;
+    address[] public electronToWftmRoute;
     address[] public wftmToWantRoute;
     address[] public wftmToLp0Route;
     address[] public wftmToLp1Route;
@@ -56,10 +66,15 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
 
     /**
      * @dev Strategy variables
-     * {minProtoToSell} - The minimum amount of reward token to swap (low or 0 amount could cause swap to revert and may not be worth the gas)
+     * {shouldSellElectron} - If Electron should be swapped to Proton and compounded or staked to earn secondary yield
+     * {allowedElectronPenalty} - Swapping Electron -> Proton has up to 30% penalty so this is the max penalty to still allow a swap.
+     *                            Denominated in units of 1e10.
+     * {shouldClaimElectron} - If Electron should be claimed (which effects the swap penalty)
     */
-    uint public minProtoToSell;
-
+    bool public shouldSellElectron;
+    uint public allowedElectronPenalty;
+    bool public shouldClaimElectron;
+    
     /**
      * @dev Initializes the strategy. Sets parameters, saves routes, and gives allowances.
      * @notice see documentation for each variable above its respective declaration.
@@ -74,7 +89,7 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
         __ReaperBaseStrategy_init(_vault, _feeRemitters, _strategists);
         want = _want;
         poolId = _poolId;
-        protoToWftmRoute = [PROTO, WFTM];
+        electronToWftmRoute = [ELECTRON, WFTM];
         
         lpToken0 = IUniswapV2Pair(want).token0();
         lpToken1 = IUniswapV2Pair(want).token1();
@@ -82,7 +97,10 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
         wftmToLp0Route = [WFTM, lpToken0];
         wftmToLp1Route = [WFTM, lpToken1];
 
-        minProtoToSell = 1000;
+        shouldSellElectron = true;
+        //allowedElectronPenalty = 297996875000; 
+        allowedElectronPenalty = 300000000000; // 30%
+        shouldClaimElectron = true;
 
         _giveAllowances();
     }
@@ -113,19 +131,63 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
      *      Profit is denominated in WFTM, and takes fees into account.
      */
     function estimateHarvest() external view override returns (uint profit, uint callFeeToUser) {
-        uint pendingProtons = IMasterChef(MASTER_CHEF).pendingProton(poolId, address(this));
-        profit = IUniswapRouter(PROTOFI_ROUTER).getAmountsOut(pendingProtons, protoToWftmRoute)[1];
+        console.log('estimateHarvest()');
+        (, uint rewardDebt) = IMoneyPot(MONEY_POT).userInfo(address(this));
+        IERC20Upgradeable rewardToken = IMoneyPot(MONEY_POT).rewardToken();
+        console.log('rewardDebt: ', rewardDebt);
+        if (rewardDebt != 0) {
+            address[] memory rewardToWftmPath = new address[](2);
+            rewardToWftmPath[0] = address(rewardToken);
+            rewardToWftmPath[1] = WFTM;
+            uint256[] memory amountOutMins = IUniswapRouter(PROTOFI_ROUTER)
+                .getAmountsOut(rewardDebt, rewardToWftmPath);
+            profit += amountOutMins[1];
+        }
+
+        uint penaltyPercent = IElectronToken(ELECTRON).getPenaltyPercent(address(this));
+        console.log('penaltyPercent: ', penaltyPercent);
+        if (penaltyPercent <= allowedElectronPenalty) {
+            uint pendingElectron = IMasterChef(MASTER_CHEF).pendingProton(poolId, address(this));
+            console.log('pendingElectron: ', pendingElectron);
+            uint electronBalance = IElectronToken(ELECTRON).balanceOf(address(this));
+            uint totalElectron = electronBalance + pendingElectron;
+            uint protonAmount = 0;
+            if(penaltyPercent == 0){
+                protonAmount = totalElectron;
+            } else {
+                protonAmount = totalElectron - (totalElectron * penaltyPercent / 1e12);
+            }
+            console.log('protonAmount: ', protonAmount);
+            if (protonAmount != 0) {
+                address[] memory protonToWftmPath = new address[](2);
+                protonToWftmPath[0] = PROTON;
+                protonToWftmPath[1] = WFTM;
+                uint256[] memory protonAmountOutMins = IUniswapRouter(PROTOFI_ROUTER)
+                    .getAmountsOut(protonAmount, protonToWftmPath);
+                profit += protonAmountOutMins[1];
+            }
+        }
+
         uint wftmFee = (profit * totalFee) / PERCENT_DIVISOR;
         callFeeToUser = (wftmFee * callFee) / PERCENT_DIVISOR;
         profit -= wftmFee;
     }
 
     /**
-     * @dev Sets the minimum reward the will be sold (too little causes revert from Uniswap)
+     * @dev Sets if the Electron rewards should be sold and compounded or staked to earn protocol revenue
      */
-    function setMinProtoToSell(uint256 _minProtoToSell) external {
+    function setShouldSellElectron(bool _shouldSellElectron) external {
         _onlyStrategistOrOwner();
-        minProtoToSell = _minProtoToSell;
+        shouldSellElectron = _shouldSellElectron;
+    }
+
+    /**
+     * @dev Sets the tolerated penalty level where the strategy will swap Electron into Proton to compound rewards
+     */
+    function setAllowedElectronPenalty(uint _allowedElectronPenalty) external {
+        _onlyStrategistOrOwner();
+        require(_allowedElectronPenalty <= 300000000000);
+        allowedElectronPenalty = _allowedElectronPenalty;
     }
     
     /**
@@ -178,10 +240,12 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
     /**
      * @dev Function that puts the funds to work.
      * It gets called whenever someone supplied in the strategy's vault contract.
-     * It supplies {want} to farm {PROTO}
+     * It supplies {want} to farm {ELECTRON}
      */
     function deposit() public whenNotPaused {
+        console.log('deposit()');
         uint wantBalance = IERC20Upgradeable(want).balanceOf(address(this));
+        console.log('wantBalance: ', wantBalance);
         IMasterChef(MASTER_CHEF).deposit(poolId, wantBalance);
     }
 
@@ -213,14 +277,19 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
 
     /**
      * @dev Core function of the strat, in charge of collecting and re-investing rewards.
-     * 1. Claims {PROTO} from the MasterChef.
-     * 2. Swaps {PROTO} to {WFTM}.
+     * 1. Claims {ELECTRON} from the MasterChef.
+     * 2. Swaps {ELECTRON} to {WFTM}.
      * 3. Claims fees for the harvest caller and treasury.
      * 4. Swaps the {WFTM} token for {want}
      * 5. Deposits.
      */
     function _harvestCore() internal override {
         _claimRewards();
+        if (shouldSellElectron) {
+            _sellAndClaimElectron();
+        } else {
+            _stakeElectron();
+        }
         _swapRewardsToWftm();
         _chargeFees();
         _addLiquidity();
@@ -232,7 +301,41 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
      * Get rewards from the MasterChef
      */
     function _claimRewards() internal {
+        console.log('_claimRewards()');
         IMasterChef(MASTER_CHEF).deposit(poolId, 0);
+    }
+
+    /**
+     * @dev Core harvest function.
+     * Compounds Electron into the want LP
+     */
+    function _sellAndClaimElectron() internal {
+        console.log('_sellAndClaimElectron()');
+        uint penaltyPercent = IElectronToken(ELECTRON).getPenaltyPercent(address(this));
+        console.log('penaltyPercent: ', penaltyPercent);
+        if (penaltyPercent <= allowedElectronPenalty) {
+            uint electronBalance = IElectronToken(ELECTRON).balanceOf(address(this));
+            console.log('electronBalance: ', electronBalance);
+            IElectronToken(ELECTRON).swapToProton(electronBalance);
+            shouldClaimElectron = true;
+            console.log('swapped electron to proton');
+        }
+        if (shouldClaimElectron) {
+            IMoneyPot(MONEY_POT).deposit(0);
+            shouldClaimElectron = false;
+            console.log('claimed electron');
+        }
+    }
+
+    /**
+     * @dev Core harvest function.
+     * Stakes Electron in the MoneyPot
+     */
+    function _stakeElectron() internal {
+        console.log('_stakeElectron()');
+        uint electronBalance = IERC20Upgradeable(ELECTRON).balanceOf(address(this));
+        console.log('electronBalance: ', electronBalance);
+        IMoneyPot(MONEY_POT).deposit(electronBalance);
     }
 
     /**
@@ -240,16 +343,40 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
      * Swaps {PROTO} to {WFTM}
      */
     function _swapRewardsToWftm() internal {
-        uint protoBalance = IERC20Upgradeable(PROTO).balanceOf(address(this));
-        if (protoBalance >= minProtoToSell) {
+        console.log('_swapRewardsToWftm()');
+        IERC20Upgradeable rewardToken = IMoneyPot(MONEY_POT).rewardToken();
+        console.log('address(rewardToken)', address(rewardToken));
+        uint moneyPotRewardBalance = rewardToken.balanceOf(address(this));
+        console.log('moneyPotRewardBalance: ', moneyPotRewardBalance);
+        if (moneyPotRewardBalance != 0) {
+            address[] memory rewardToWftmPath = new address[](2);
+            rewardToWftmPath[0] = address(rewardToken);
+            rewardToWftmPath[1] = WFTM;
             IUniswapRouter(PROTOFI_ROUTER).swapExactTokensForTokensSupportingFeeOnTransferTokens(
-                protoBalance,
+                moneyPotRewardBalance,
                 0,
-                protoToWftmRoute,
+                rewardToWftmPath,
                 address(this),
                 block.timestamp
             );
         }
+        uint protonBalance = IERC20Upgradeable(PROTON).balanceOf(address(this));
+        console.log('protonBalance: ', protonBalance);
+        if (protonBalance != 0) {
+            address[] memory protonToWftmPath = new address[](2);
+            protonToWftmPath[0] = PROTON;
+            protonToWftmPath[1] = WFTM;
+            IUniswapRouter(PROTOFI_ROUTER).swapExactTokensForTokensSupportingFeeOnTransferTokens(
+                protonBalance,
+                0,
+                protonToWftmPath,
+                address(this),
+                block.timestamp
+            );
+        }
+            // IZap(ZAP).zapInToken(PROTON, protonBalance, want, PROTOFI_ROUTER, address(this));
+        // zapInToken(address _from, uint amount, address _to, address routerAddr, address _recipient)
+        //IZap(ZAP).zapInToken(rewardToken, moneyPotRewardBalance, want, PROTOFI_ROUTER, address(this));
     }
 
     /**
@@ -272,45 +399,12 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
 
     /** @dev Converts WFTM to both sides of the LP token and builds the liquidity pair */
     function _addLiquidity() internal {
-        uint wrappedHalf = IERC20Upgradeable(WFTM).balanceOf(address(this)) / 2;
-        if (wrappedHalf == 0) {
-            return;
+        console.log('_addLiquidity()');
+        uint wftmBalance = IERC20Upgradeable(WFTM).balanceOf(address(this));
+        console.log('wftmBalance: ', wftmBalance);
+        if (wftmBalance != 0) {
+            IZap(ZAP).zapInToken(WFTM, wftmBalance, want, PROTOFI_ROUTER, address(this));
         }
-
-        if (lpToken0 != WFTM) {
-            IUniswapRouter(PROTOFI_ROUTER)
-                .swapExactTokensForTokensSupportingFeeOnTransferTokens(
-                    wrappedHalf,
-                    0,
-                    wftmToLp0Route,
-                    address(this),
-                    block.timestamp
-                );
-        }
-        if (lpToken1 != WFTM) {
-            IUniswapRouter(PROTOFI_ROUTER)
-                .swapExactTokensForTokensSupportingFeeOnTransferTokens(
-                    wrappedHalf,
-                    0,
-                    wftmToLp1Route,
-                    address(this),
-                    block.timestamp
-                );
-        }
-
-        uint lp0Bal = IERC20Upgradeable(lpToken0).balanceOf(address(this));
-        uint lp1Bal = IERC20Upgradeable(lpToken1).balanceOf(address(this));
-
-        IUniswapRouter(PROTOFI_ROUTER).addLiquidity(
-            lpToken0,
-            lpToken1,
-            lp0Bal,
-            lp1Bal,
-            1,
-            1,
-            address(this),
-            block.timestamp
-        );
     }
 
     /**
@@ -322,15 +416,21 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
             MASTER_CHEF,
             wantAllowance
         );
-        uint protoAllowance = type(uint).max - IERC20Upgradeable(PROTO).allowance(address(this), PROTOFI_ROUTER);
-        IERC20Upgradeable(PROTO).safeIncreaseAllowance(
-            PROTOFI_ROUTER,
-            protoAllowance
+        uint electronAllowance = type(uint).max - IERC20Upgradeable(ELECTRON).allowance(address(this), MONEY_POT);
+        IERC20Upgradeable(ELECTRON).safeIncreaseAllowance(
+            MONEY_POT,
+            electronAllowance
         );
-        uint wftmAllowance = type(uint).max - IERC20Upgradeable(WFTM).allowance(address(this), PROTOFI_ROUTER);
+        uint wftmAllowance = type(uint).max - IERC20Upgradeable(WFTM).allowance(address(this), ZAP);
         IERC20Upgradeable(WFTM).safeIncreaseAllowance(
-            PROTOFI_ROUTER,
+            ZAP,
             wftmAllowance
+        );
+        address rewardToken = address(IMoneyPot(MONEY_POT).rewardToken());
+        uint rewardAllowance = type(uint).max - IERC20Upgradeable(rewardToken).allowance(address(this), PROTOFI_ROUTER);
+        IERC20Upgradeable(rewardToken).safeIncreaseAllowance(
+            PROTOFI_ROUTER,
+            rewardAllowance
         );
         uint lp0Allowance = type(uint).max - IERC20Upgradeable(lpToken0).allowance(address(this), PROTOFI_ROUTER);
         IERC20Upgradeable(lpToken0).safeIncreaseAllowance(
@@ -349,7 +449,7 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
      */
     function _removeAllowances() internal {
         IERC20Upgradeable(want).safeDecreaseAllowance(MASTER_CHEF, IERC20Upgradeable(want).allowance(address(this), MASTER_CHEF));
-        IERC20Upgradeable(PROTO).safeDecreaseAllowance(PROTOFI_ROUTER, IERC20Upgradeable(PROTO).allowance(address(this), PROTOFI_ROUTER));
+        IERC20Upgradeable(ELECTRON).safeDecreaseAllowance(MONEY_POT, IERC20Upgradeable(ELECTRON).allowance(address(this), MONEY_POT));
         IERC20Upgradeable(WFTM).safeDecreaseAllowance(PROTOFI_ROUTER, IERC20Upgradeable(WFTM).allowance(address(this), PROTOFI_ROUTER));
         IERC20Upgradeable(lpToken0).safeDecreaseAllowance(PROTOFI_ROUTER, IERC20Upgradeable(lpToken0).allowance(address(this), PROTOFI_ROUTER));
         IERC20Upgradeable(lpToken1).safeDecreaseAllowance(PROTOFI_ROUTER, IERC20Upgradeable(lpToken1).allowance(address(this), PROTOFI_ROUTER));

@@ -28,6 +28,8 @@ abstract contract ReaperBaseStrategy is
     uint256 public harvestLogCadence;
     uint256 public lastHarvestTimestamp;
 
+    uint256 public upgradeProposalTime;
+
     /**
      * Reaper Roles
      */
@@ -85,8 +87,6 @@ abstract contract ReaperBaseStrategy is
     event StratHarvest(address indexed harvester);
     event StrategistRemitterUpdated(address newStrategistRemitter);
 
-    uint256 public upgradeProposalTime;
-
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() initializer {}
 
@@ -139,37 +139,6 @@ abstract contract ReaperBaseStrategy is
 
     function harvestLogLength() external view returns (uint256) {
         return harvestLog.length;
-    }
-
-    /**
-     * @dev Returns a slice of the harvest log containing the _n latest harvests.
-     */
-    function latestHarvestLogSlice(uint256 _n) external view returns (Harvest[] memory slice) {
-        slice = new Harvest[](_n);
-        uint256 sliceCounter = 0;
-
-        for (uint256 i = harvestLog.length - _n; i < harvestLog.length; i++) {
-            slice[sliceCounter++] = harvestLog[i];
-        }
-    }
-
-    /**
-     * @dev Traverses the harvest log backwards until it hits _timestamp,
-     *      and returns the average APR calculated across all the included
-     *      log entries. APR is multiplied by PERCENT_DIVISOR to retain precision.
-     */
-    function averageAPRSince(uint256 _timestamp) external view returns (int256) {
-        require(harvestLog.length >= 2, "need at least 2 log entries");
-
-        int256 runningAPRSum;
-        int256 numLogsProcessed;
-
-        for (uint256 i = harvestLog.length - 1; i > 0 && harvestLog[i].timestamp >= _timestamp; i--) {
-            runningAPRSum += calculateAPRUsingLogs(i - 1, i);
-            numLogsProcessed++;
-        }
-
-        return runningAPRSum / numLogsProcessed;
     }
 
     /**
@@ -264,24 +233,6 @@ abstract contract ReaperBaseStrategy is
     }
 
     /**
-     * @dev DEFAULT_ADMIN_ROLE must call this function prior to upgrading the implementation
-     *      and wait UPGRADE_TIMELOCK seconds before executing the upgrade.
-     */
-    function initiateUpgradeCooldown() external onlyRole(DEFAULT_ADMIN_ROLE) {
-        upgradeProposalTime = block.timestamp;
-    }
-
-    /**
-     * @dev This function is called:
-     *      - in initialize()
-     *      - as part of a successful upgrade
-     *      - manually by DEFAULT_ADMIN_ROLE to clear the upgrade cooldown.
-     */
-    function clearUpgradeCooldown() public onlyRole(DEFAULT_ADMIN_ROLE) {
-        upgradeProposalTime = block.timestamp + (ONE_YEAR * 100);
-    }
-
-    /**
      * @dev Only allow access to strategist or owner
      */
     function _onlyStrategistOrOwner() internal view {
@@ -317,6 +268,34 @@ abstract contract ReaperBaseStrategy is
     }
 
     /**
+     * @dev DEFAULT_ADMIN_ROLE must call this function prior to upgrading the implementation
+     *      and wait UPGRADE_TIMELOCK seconds before executing the upgrade.
+     */
+    function initiateUpgradeCooldown() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        upgradeProposalTime = block.timestamp;
+    }
+
+    /**
+     * @dev This function is called:
+     *      - in initialize()
+     *      - as part of a successful upgrade
+     *      - manually by DEFAULT_ADMIN_ROLE to clear the upgrade cooldown.
+     */
+    function clearUpgradeCooldown() public onlyRole(DEFAULT_ADMIN_ROLE) {
+        upgradeProposalTime = block.timestamp + (ONE_YEAR * 100);
+    }
+
+    /**
+     * @dev This function must be overriden simply for access control purposes.
+     *      Only DEFAULT_ADMIN_ROLE can upgrade the implementation once the timelock
+     *      has passed.
+     */
+    function _authorizeUpgrade(address) internal override onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(upgradeProposalTime + UPGRADE_TIMELOCK < block.timestamp, "cooldown not initiated or still active");
+        clearUpgradeCooldown();
+    }
+
+    /**
      * @dev Returns the approx amount of profit from harvesting plus fee that
      *      would be returned to harvest caller.
      */
@@ -329,14 +308,4 @@ abstract contract ReaperBaseStrategy is
      *      including charging any fees.
      */
     function _harvestCore() internal virtual;
-
-    /**
-     * @dev This function must be overriden simply for access control purposes.
-     *      Only DEFAULT_ADMIN_ROLE can upgrade the implementation once the timelock
-     *      has passed.
-     */
-    function _authorizeUpgrade(address) internal override onlyRole(DEFAULT_ADMIN_ROLE) {
-        require(upgradeProposalTime + UPGRADE_TIMELOCK < block.timestamp, "cooldown not initiated or still active");
-        clearUpgradeCooldown();
-    }
 }

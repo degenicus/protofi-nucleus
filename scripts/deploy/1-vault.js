@@ -1,5 +1,5 @@
 async function main() {
-  const Vault = await ethers.getContractFactory('ReaperVaultv1_3');
+  const Vault = await ethers.getContractFactory('ReaperVaultv1_4');
 
   const ftmUsdcLPAddress = '0x1a8a4Dc716e9379e84E907B0c740d2c622F7cfb7';
   const wantAddress = ftmUsdcLPAddress;

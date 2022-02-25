@@ -98,10 +98,7 @@ contract ReaperVaultv1_4 is ERC20, Ownable, ReentrancyGuard {
 
     function initialize(address _strategy) public onlyOwner returns (bool) {
         require(!initialized, "Contract is already initialized.");
-        require(
-            block.timestamp <= (constructionTime + 1200),
-            "initialization period over, too bad!"
-        );
+        require(block.timestamp <= (constructionTime + 1200), "initialization period over, too bad!");
         strategy = _strategy;
         initialized = true;
         return true;
@@ -113,10 +110,7 @@ contract ReaperVaultv1_4 is ERC20, Ownable, ReentrancyGuard {
      */
 
     function agreeToTerms() public returns (bool) {
-        require(
-            !hasReadAndAcceptedTerms[msg.sender],
-            "you have already accepted the terms"
-        );
+        require(!hasReadAndAcceptedTerms[msg.sender], "you have already accepted the terms");
         hasReadAndAcceptedTerms[msg.sender] = true;
         emit TermsAccepted(msg.sender);
         return true;
@@ -173,8 +167,7 @@ contract ReaperVaultv1_4 is ERC20, Ownable, ReentrancyGuard {
         token.safeTransferFrom(msg.sender, address(this), _amount);
         uint256 _after = token.balanceOf(address(this));
         _amount = _after - _before;
-        uint256 _amountAfterDeposit = (_amount *
-            (PERCENT_DIVISOR - depositFee)) / PERCENT_DIVISOR;
+        uint256 _amountAfterDeposit = (_amount * (PERCENT_DIVISOR - depositFee)) / PERCENT_DIVISOR;
         uint256 shares = 0;
         if (totalSupply() == 0) {
             shares = _amountAfterDeposit;

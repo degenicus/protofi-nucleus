@@ -421,8 +421,11 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
         uint256 wantAllowance = type(uint256).max - IERC20Upgradeable(want).allowance(address(this), MASTER_CHEF);
         IERC20Upgradeable(want).safeIncreaseAllowance(MASTER_CHEF, wantAllowance);
 
-        uint256 electronAllowance = type(uint256).max - IERC20Upgradeable(ELCT).allowance(address(this), moneyPotAddr);
-        IERC20Upgradeable(ELCT).safeIncreaseAllowance(moneyPotAddr, electronAllowance);
+        uint256 elctAllowance = type(uint256).max - IERC20Upgradeable(ELCT).allowance(address(this), moneyPotAddr);
+        IERC20Upgradeable(ELCT).safeIncreaseAllowance(moneyPotAddr, elctAllowance);
+
+        uint256 protoAllowance = type(uint256).max - IERC20Upgradeable(PROTO).allowance(address(this), PROTOFI_ROUTER);
+        IERC20Upgradeable(PROTO).safeIncreaseAllowance(PROTOFI_ROUTER, protoAllowance);
 
         uint256 wftmAllowance = type(uint256).max - IERC20Upgradeable(WFTM).allowance(address(this), ZAP);
         IERC20Upgradeable(WFTM).safeIncreaseAllowance(ZAP, wftmAllowance);
@@ -444,9 +447,13 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
             moneyPotAddr,
             IERC20Upgradeable(ELCT).allowance(address(this), moneyPotAddr)
         );
-        IERC20Upgradeable(WFTM).safeDecreaseAllowance(
+        IERC20Upgradeable(PROTO).safeDecreaseAllowance(
             PROTOFI_ROUTER,
-            IERC20Upgradeable(WFTM).allowance(address(this), PROTOFI_ROUTER)
+            IERC20Upgradeable(PROTO).allowance(address(this), PROTOFI_ROUTER)
+        );
+        IERC20Upgradeable(WFTM).safeDecreaseAllowance(
+            ZAP,
+            IERC20Upgradeable(WFTM).allowance(address(this), ZAP)
         );
         IERC20Upgradeable(rewardToWftmRoute[0]).safeDecreaseAllowance(
             PROTOFI_ROUTER,

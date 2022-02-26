@@ -17,21 +17,20 @@ import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeab
 contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
     using SafeERC20Upgradeable for IERC20Upgradeable;
 
+    // full 30% penalty when immediately swapping ELCT -> PROTO
+    uint256 public constant AFTER_PENALTY = 70_000;
+
     /**
      * @dev Tokens Used:
      * {WFTM} - Required for liquidity routing when doing swaps. Also used to charge fees on yield.
      * {ELCT} - The reward token for farming
      * {PROTO} - Token gained from swapping ELCT, to be converted to LP
      * {want} - The vault token the strategy is maximizing
-     * {lpToken0} - Token 0 of the LP want token
-     * {lpToken1} - Token 1 of the LP want token
      */
     address public constant WFTM = 0x21be370D5312f44cB42ce377BC9b8a0cEF1A4C83;
     address public constant ELCT = 0x622265EaB66A45FA05bAc9B8d2262AA548FA449E;
     address public constant PROTO = 0xa23c4e69e5Eaf4500F2f9301717f12B578b948FB;
     address public want;
-    address public lpToken0;
-    address public lpToken1;
 
     /**
      * @dev Third Party Contracts:
@@ -45,7 +44,7 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
     address public constant ZAP = 0xF0ff07d19f310abab54724a8876Eee71E338c82F;
     // TODO tess3rac7 MONEY_POT address can change?
     // Add new setter function that would move the entire deposit and update allowances
-    // Also have the ability to set the path for the reward token
+    // Also have the ability to set the path for the reward token and give allowances for it
 
     // TODO tess3rac7 what if ProtoFi doesn't have liquidity for a certain reward token?
     // Should we use a separate router address for swapping the MoneyPot reward token?
@@ -55,13 +54,9 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
      * @dev Routes we take to swap tokens
      * {protoToWftmRoute} - Route we take to get from {PROTO} into {WFTM}.
      * {wftmToWantRoute} - Route we take to get from {WFTM} into {want}.
-     * {wftmToLp0Route} - Route we take to get from {WFTM} into {lpToken0}.
-     * {wftmToLp1Route} - Route we take to get from {WFTM} into {lpToken1}.
      */
     address[] public protoToWftmRoute;
     address[] public wftmToWantRoute;
-    address[] public wftmToLp0Route;
-    address[] public wftmToLp1Route;
 
     /**
      * @dev Protofi variables
@@ -93,12 +88,7 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
         poolId = _poolId;
         protoToWftmRoute = [ELCT, WFTM];
 
-        lpToken0 = IUniswapV2Pair(want).token0();
-        lpToken1 = IUniswapV2Pair(want).token1();
-
-        wftmToLp0Route = [WFTM, lpToken0];
-        wftmToLp1Route = [WFTM, lpToken1];
-
+        // to start, compound all MasterChef {ELCT} emissions with full 30% penalty
         MCEmissionsSellPercent = PERCENT_DIVISOR;
         MPDepositSellPercent = 0;
 
@@ -121,6 +111,7 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
      * The available {want} minus fees is returned to the vault.
      */
     function withdraw(uint256 _withdrawAmount) external {
+        require(msg.sender == vault, "!vault");
         uint256 wantBalance = IERC20Upgradeable(want).balanceOf(address(this));
 
         if (wantBalance < _withdrawAmount) {
@@ -138,17 +129,28 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
 
     /**
      * @dev Core function of the strat, in charge of collecting and re-investing rewards.
+     * 1. Claims various rewards and swap to {WFTM}.
+     * 2. Charges performance fees from the {WFTM} balance.
+     * 3. Swaps the remaining {WFTM} token for {want}.
+     * 4. Invokes deposit().
+     */
+    function _harvestCore() internal override {
+        _claimRewardsAndSwapToWftm();
+        _chargeFees();
+        _addLiquidity();
+        deposit();
+    }
+
+    /**
+     * @dev Core harvest function.
      * 1. Claims {ELCT} rewards from the MasterChef.
      * 2. Swaps {MCEmissionsSellPercent} of the claimed {ELCT} to {PROTO}.
      * 3. Withdraws {MPDepositSellPercent} of {ELCT} from the MoneyPot and swaps it to {PROTO}.
      * 4. Deposists any remaining {ELCT} into the MoneyPot.
      * 5. Swaps strategy's {PROTO} balance to {WFTM}.
      * 6. Claims {X} rewards from the MoneyPot (X is variable) and swap it {WFTM}.
-     * 7. Charges performance fees from the {WFTM} balance.
-     * 8. Swaps the remaining {WFTM} token for {want}.
-     * 9. Invokes deposit().
      */
-    function _harvestCore() internal override {
+    function _claimRewardsAndSwapToWftm() internal {
         IElectronToken elct = IElectronToken(ELCT);
         IMasterChef masterChef = IMasterChef(MASTER_CHEF);
         IMoneyPot moneyPot = IMoneyPot(MONEY_POT);
@@ -183,10 +185,6 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
                 block.timestamp
             );
         } // other half of 6
-
-        _chargeFees(); // 7
-        _addLiquidity(); // 8
-        deposit(); // 9
     }
 
     /**
@@ -219,39 +217,44 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
     /**
      * @dev Returns the approx amount of profit from harvesting.
      *      Profit is denominated in WFTM, and takes fees into account.
+     *      Profit is made up of:
+     *      1. {MPDepositSellPercent} of MoneyPot deposit (full 30% penalty applies)
+     *      2. {MCEmissionsSellPercent} of MasterChef ELCT rewards (full 30% penalty applies)
+     *      3. Full rewards from MoneyPot
      */
     function estimateHarvest() external view override returns (uint256 profit, uint256 callFeeToUser) {
-        (, uint256 rewardDebt) = IMoneyPot(MONEY_POT).userInfo(address(this));
-        IERC20Upgradeable rewardToken = IMoneyPot(MONEY_POT).rewardToken();
-        if (rewardDebt != 0) {
-            address[] memory rewardToWftmPath = new address[](2);
-            rewardToWftmPath[0] = address(rewardToken);
-            rewardToWftmPath[1] = WFTM;
-            uint256[] memory amountOutMins = IUniswapRouter(PROTOFI_ROUTER).getAmountsOut(rewardDebt, rewardToWftmPath);
+        IElectronToken elct = IElectronToken(ELCT);
+        IMasterChef masterChef = IMasterChef(MASTER_CHEF);
+        IMoneyPot moneyPot = IMoneyPot(MONEY_POT);
+
+        // 1
+        (uint256 elctAmount, ) = moneyPot.userInfo(address(this));
+        elctAmount = (elctAmount * MPDepositSellPercent) / PERCENT_DIVISOR;
+
+        // 2 (yes, function is called "pendingProton" even though reward could be ELCT or PROTO)
+        elctAmount += masterChef.pendingProton(poolId, address(this));
+
+        // 1 + 2
+        if (elctAmount != 0) {
+            uint256[] memory amountOutMins = IUniswapRouter(PROTOFI_ROUTER).getAmountsOut(
+                (elctAmount * AFTER_PENALTY) / PERCENT_DIVISOR,
+                protoToWftmRoute
+            );
             profit += amountOutMins[1];
         }
 
-        uint256 penaltyPercent = IElectronToken(ELCT).getPenaltyPercent(address(this));
-        if (penaltyPercent <= allowedElectronPenalty) {
-            uint256 pendingElectron = IMasterChef(MASTER_CHEF).pendingProton(poolId, address(this));
-            uint256 electronBalance = IElectronToken(ELCT).balanceOf(address(this));
-            uint256 totalElectron = electronBalance + pendingElectron;
-            uint256 protonAmount = 0;
-            if (penaltyPercent == 0) {
-                protonAmount = totalElectron;
-            } else {
-                protonAmount = totalElectron - ((totalElectron * penaltyPercent) / 1e12);
-            }
-            if (protonAmount != 0) {
-                address[] memory protonToWftmPath = new address[](2);
-                protonToWftmPath[0] = PROTO;
-                protonToWftmPath[1] = WFTM;
-                uint256[] memory protonAmountOutMins = IUniswapRouter(PROTOFI_ROUTER).getAmountsOut(
-                    protonAmount,
-                    protonToWftmPath
-                );
-                profit += protonAmountOutMins[1];
-            }
+        // 3
+        uint256 rewardAmount = moneyPot.pendingReward(address(this));
+        IERC20Upgradeable rewardToken = moneyPot.rewardToken();
+        if (rewardAmount != 0) {
+            address[] memory rewardToWftmPath = new address[](2);
+            rewardToWftmPath[0] = address(rewardToken);
+            rewardToWftmPath[1] = WFTM;
+            uint256[] memory amountOutMins = IUniswapRouter(PROTOFI_ROUTER).getAmountsOut(
+                rewardAmount,
+                rewardToWftmPath
+            );
+            profit += amountOutMins[1];
         }
 
         uint256 wftmFee = (profit * totalFee) / PERCENT_DIVISOR;
@@ -260,20 +263,15 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
     }
 
     /**
-     * @dev Sets if the ELCT rewards should be sold and compounded or staked to earn protocol revenue
+     * @dev Function to configure the strategy params {MCEmissionsSellPercent} and
+     * {MPDepositSellPercent}. Can only be called by strategist or owner.
      */
-    function setShouldSellElectron(bool _shouldSellElectron) external {
+    function setStratParams(uint256 _MCEmissionsSellPercent, uint256 _MPDepositSellPercent) external {
         _onlyStrategistOrOwner();
-        shouldSellElectron = _shouldSellElectron;
-    }
-
-    /**
-     * @dev Sets the tolerated penalty level where the strategy will swap ELCT into PROTO to compound rewards
-     */
-    function setAllowedElectronPenalty(uint256 _allowedElectronPenalty) external {
-        _onlyStrategistOrOwner();
-        require(_allowedElectronPenalty <= 300000000000);
-        allowedElectronPenalty = _allowedElectronPenalty;
+        require(_MCEmissionsSellPercent <= PERCENT_DIVISOR, "invalid _MCEmissionsSellPercent");
+        require(_MPDepositSellPercent <= PERCENT_DIVISOR, "invalid _MPDepositSellPercent");
+        MCEmissionsSellPercent = _MCEmissionsSellPercent;
+        MPDepositSellPercent = _MPDepositSellPercent;
     }
 
     /**
@@ -285,14 +283,20 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
      */
     function retireStrat() external {
         _onlyStrategistOrOwner();
-        _harvestCore();
+
+        // mini-harvest
+        _claimRewardsAndSwapToWftm();
+        _addLiquidity();
+
         IMasterChef(MASTER_CHEF).withdraw(poolId, balanceOfPool());
         uint256 wantBalance = IERC20Upgradeable(want).balanceOf(address(this));
         IERC20Upgradeable(want).safeTransfer(vault, wantBalance);
+
+        // TODO tess3rac7 left-over {ELCT} in the MoneyPot can be remitted to treasury and strategists
     }
 
     /**
-     * @dev Pauses supplied. Withdraws all funds from the ProtoFi MasterChef, leaving rewards behind.
+     * @dev Pauses deposits. Withdraws all funds from the ProtoFi MasterChef, leaving rewards behind.
      */
     function panic() external {
         _onlyStrategistOrOwner();
@@ -308,9 +312,7 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
     function unpause() external {
         _onlyStrategistOrOwner();
         _unpause();
-
         _giveAllowances();
-
         deposit();
     }
 
@@ -347,94 +349,22 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
     }
 
     /**
-     * @dev Core harvest function.
-     * Get rewards from the MasterChef
-     */
-    function _claimRewards() internal {
-        IMasterChef(MASTER_CHEF).deposit(poolId, 0);
-    }
-
-    /**
-     * @dev Core harvest function.
-     * Compounds ELCT into the want LP
-     */
-    function _sellAndClaimElectron() internal {
-        uint256 penaltyPercent = IElectronToken(ELCT).getPenaltyPercent(address(this));
-        if (penaltyPercent <= allowedElectronPenalty) {
-            uint256 electronBalance = IElectronToken(ELCT).balanceOf(address(this));
-            IElectronToken(ELCT).swapToProton(electronBalance);
-            shouldClaimElectron = true;
-        }
-        if (shouldClaimElectron) {
-            IMoneyPot(MONEY_POT).deposit(0);
-            shouldClaimElectron = false;
-        }
-    }
-
-    /**
-     * @dev Core harvest function.
-     * Stakes ELCT in the MoneyPot
-     */
-    function _stakeElectron() internal {
-        uint256 electronBalance = IERC20Upgradeable(ELCT).balanceOf(address(this));
-        IMoneyPot(MONEY_POT).deposit(electronBalance);
-    }
-
-    /**
-     * @dev Core harvest function.
-     * Swaps {PROTO} to {WFTM}
-     */
-    function _swapRewardsToWftm() internal {
-        IERC20Upgradeable rewardToken = IMoneyPot(MONEY_POT).rewardToken();
-        uint256 moneyPotRewardBalance = rewardToken.balanceOf(address(this));
-        if (moneyPotRewardBalance != 0) {
-            address[] memory rewardToWftmPath = new address[](2);
-            rewardToWftmPath[0] = address(rewardToken);
-            rewardToWftmPath[1] = WFTM;
-            IUniswapRouter(PROTOFI_ROUTER).swapExactTokensForTokensSupportingFeeOnTransferTokens(
-                moneyPotRewardBalance,
-                0,
-                rewardToWftmPath,
-                address(this),
-                block.timestamp
-            );
-        }
-        uint256 protonBalance = IERC20Upgradeable(PROTO).balanceOf(address(this));
-        if (protonBalance != 0) {
-            address[] memory protonToWftmPath = new address[](2);
-            protonToWftmPath[0] = PROTO;
-            protonToWftmPath[1] = WFTM;
-            IUniswapRouter(PROTOFI_ROUTER).swapExactTokensForTokensSupportingFeeOnTransferTokens(
-                protonBalance,
-                0,
-                protonToWftmPath,
-                address(this),
-                block.timestamp
-            );
-        }
-        // IZap(ZAP).zapInToken(PROTO, protonBalance, want, PROTOFI_ROUTER, address(this));
-        // zapInToken(address _from, uint amount, address _to, address routerAddr, address _recipient)
-        //IZap(ZAP).zapInToken(rewardToken, moneyPotRewardBalance, want, PROTOFI_ROUTER, address(this));
-    }
-
-    /**
      * @dev Gives the necessary allowances
      */
     function _giveAllowances() internal {
         uint256 wantAllowance = type(uint256).max - IERC20Upgradeable(want).allowance(address(this), MASTER_CHEF);
         IERC20Upgradeable(want).safeIncreaseAllowance(MASTER_CHEF, wantAllowance);
+
         uint256 electronAllowance = type(uint256).max - IERC20Upgradeable(ELCT).allowance(address(this), MONEY_POT);
         IERC20Upgradeable(ELCT).safeIncreaseAllowance(MONEY_POT, electronAllowance);
+
         uint256 wftmAllowance = type(uint256).max - IERC20Upgradeable(WFTM).allowance(address(this), ZAP);
         IERC20Upgradeable(WFTM).safeIncreaseAllowance(ZAP, wftmAllowance);
+
         address rewardToken = address(IMoneyPot(MONEY_POT).rewardToken());
         uint256 rewardAllowance = type(uint256).max -
             IERC20Upgradeable(rewardToken).allowance(address(this), PROTOFI_ROUTER);
         IERC20Upgradeable(rewardToken).safeIncreaseAllowance(PROTOFI_ROUTER, rewardAllowance);
-        uint256 lp0Allowance = type(uint256).max - IERC20Upgradeable(lpToken0).allowance(address(this), PROTOFI_ROUTER);
-        IERC20Upgradeable(lpToken0).safeIncreaseAllowance(PROTOFI_ROUTER, lp0Allowance);
-        uint256 lp1Allowance = type(uint256).max - IERC20Upgradeable(lpToken1).allowance(address(this), PROTOFI_ROUTER);
-        IERC20Upgradeable(lpToken1).safeIncreaseAllowance(PROTOFI_ROUTER, lp1Allowance);
     }
 
     /**
@@ -452,14 +382,6 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
         IERC20Upgradeable(WFTM).safeDecreaseAllowance(
             PROTOFI_ROUTER,
             IERC20Upgradeable(WFTM).allowance(address(this), PROTOFI_ROUTER)
-        );
-        IERC20Upgradeable(lpToken0).safeDecreaseAllowance(
-            PROTOFI_ROUTER,
-            IERC20Upgradeable(lpToken0).allowance(address(this), PROTOFI_ROUTER)
-        );
-        IERC20Upgradeable(lpToken1).safeDecreaseAllowance(
-            PROTOFI_ROUTER,
-            IERC20Upgradeable(lpToken1).allowance(address(this), PROTOFI_ROUTER)
         );
     }
 }

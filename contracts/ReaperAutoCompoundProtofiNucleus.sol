@@ -42,9 +42,6 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
     address public constant MASTER_CHEF = 0xa71f52aee8311c22b6329EF7715A5B8aBF1c6588;
     address public constant MONEY_POT_INITIAL = 0x180B3622BcC123e900E5eB603066755418d0b4F5;
     address public constant ZAP = 0xF0ff07d19f310abab54724a8876Eee71E338c82F;
-    // TODO tess3rac7 MONEY_POT address can change?
-    // Add new setter function that would move the entire deposit and update allowances
-    // Also have the ability to set the path for the reward token and give allowances for it
 
     /**
      * @dev Routes we take to swap tokens

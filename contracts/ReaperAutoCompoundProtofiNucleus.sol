@@ -159,20 +159,27 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
         IMoneyPot moneyPot = IMoneyPot(moneyPotAddr);
 
         masterChef.deposit(poolId, 0); // 1
-        elct.swapToProton((elct.balanceOf(address(this)) * MCEmissionsSellPercent) / PERCENT_DIVISOR); // 2
+
+        uint256 elctBalance = elct.balanceOf(address(this));
+        if (elctBalance != 0) {
+            elct.swapToProton((elctBalance * MCEmissionsSellPercent) / PERCENT_DIVISOR); // 2
+        }
 
         (uint256 MPDeposit, ) = moneyPot.userInfo(address(this));
         moneyPot.withdraw((MPDeposit * MPDepositSellPercent) / PERCENT_DIVISOR); // 3 + 6 (withdrawing claims rewards)
 
         moneyPot.deposit(elct.balanceOf(address(this))); // 4
 
-        IUniswapRouter(PROTOFI_ROUTER).swapExactTokensForTokensSupportingFeeOnTransferTokens(
-            IERC20Upgradeable(PROTO).balanceOf(address(this)),
-            0,
-            protoToWftmRoute,
-            address(this),
-            block.timestamp
-        ); // 5
+        uint256 protoBalance = IERC20Upgradeable(PROTO).balanceOf(address(this));
+        if (protoBalance != 0) {
+            IUniswapRouter(PROTOFI_ROUTER).swapExactTokensForTokensSupportingFeeOnTransferTokens(
+                IERC20Upgradeable(PROTO).balanceOf(address(this)),
+                0,
+                protoToWftmRoute,
+                address(this),
+                block.timestamp
+            ); // 5
+        }
 
         address rewardToken = rewardToWftmRoute[0];
         uint256 moneyPotRewardBalance = IERC20Upgradeable(rewardToken).balanceOf(address(this));
@@ -342,6 +349,10 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
         // left-over {ELCT} in the MoneyPot can be remitted to treasury and strategists
         // reward was just claimed so only {ELCT} withdrawn now
         (uint256 elctAmount, ) = IMoneyPot(moneyPotAddr).userInfo(address(this));
+        if (elctAmount == 0) {
+            return;
+        }
+
         IMoneyPot(moneyPotAddr).withdraw(elctAmount);
         IElectronToken(ELCT).swapToProton(elctAmount);
         IUniswapRouter(PROTOFI_ROUTER).swapExactTokensForTokensSupportingFeeOnTransferTokens(
@@ -451,10 +462,7 @@ contract ReaperAutoCompoundProtofiNucleus is ReaperBaseStrategy {
             PROTOFI_ROUTER,
             IERC20Upgradeable(PROTO).allowance(address(this), PROTOFI_ROUTER)
         );
-        IERC20Upgradeable(WFTM).safeDecreaseAllowance(
-            ZAP,
-            IERC20Upgradeable(WFTM).allowance(address(this), ZAP)
-        );
+        IERC20Upgradeable(WFTM).safeDecreaseAllowance(ZAP, IERC20Upgradeable(WFTM).allowance(address(this), ZAP));
         IERC20Upgradeable(rewardToWftmRoute[0]).safeDecreaseAllowance(
             PROTOFI_ROUTER,
             IERC20Upgradeable(rewardToWftmRoute[0]).allowance(address(this), PROTOFI_ROUTER)

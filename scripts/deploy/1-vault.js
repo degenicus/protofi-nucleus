@@ -1,12 +1,11 @@
 async function main() {
   const Vault = await ethers.getContractFactory('ReaperVaultv1_4');
 
-  const ftmUsdcLPAddress = '0x1a8a4Dc716e9379e84E907B0c740d2c622F7cfb7';
-  const wantAddress = ftmUsdcLPAddress;
-  const tokenName = 'Protofi FTM-USDC Vault';
-  const tokenSymbol = 'rf-PF-FTM-USDC';
-  const depositFee = 10;
-  const tvlCap = ethers.utils.parseEther('0.002');
+  const wantAddress = '0xfbF535224f1f473b6438bf50Fbf3200b8659eDDE';
+  const tokenName = 'ProtoFi PROTO-FTM Crypt';
+  const tokenSymbol = 'rfPF-PROTO-FTM';
+  const depositFee = ethers.BigNumber.from(0);
+  const tvlCap = ethers.utils.parseEther('1000');
 
   const vault = await Vault.deploy(wantAddress, tokenName, tokenSymbol, depositFee, tvlCap);
 
